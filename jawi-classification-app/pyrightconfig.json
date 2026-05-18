@@ -1,0 +1,10 @@
+{
+  "venvPath": ".",
+  "venv": "venv",
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "include": ["app", "scripts"],
+  "exclude": ["venv", "dataset", "raw_dataset", "data"],
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false
+}
