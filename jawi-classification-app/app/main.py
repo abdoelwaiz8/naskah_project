@@ -7,7 +7,19 @@ dari gambar halaman naskah penuh menggunakan model ResNet34 PyTorch.
 
 from __future__ import annotations
 import sys, os
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
+
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if env_path.exists():
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped:
+                if stripped[0] != "#":
+                    parts = stripped.split("=", 1)
+                    if len(parts) == 2:
+                        os.environ[parts[0].strip()] = parts[1].strip()
 
 import streamlit as st
 import pandas as pd
@@ -285,6 +297,39 @@ def render_jawi_found(jawi_found: list[dict]) -> None:
     st.markdown(pills_html, unsafe_allow_html=True)
 
 
+def render_context_card(category: str, explanation: str) -> None:
+    if not category:
+        return
+    if category == "Agama":
+        color = "#10b981"
+        bg_gradient = "linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(4, 120, 87, 0.05) 100%)"
+        icon = "🕌"
+    elif category == "Hikayat":
+        color = "#f59e0b"
+        bg_gradient = "linear-gradient(135deg, rgba(245, 158, 11, 0.15) 0%, rgba(180, 83, 9, 0.05) 100%)"
+        icon = "📜"
+    else:
+        color = "#3b82f6"
+        bg_gradient = "linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(29, 78, 216, 0.05) 100%)"
+        icon = "🧠"
+
+    st.markdown(
+        "<div class='glass-card' style='border-left: 5px solid " + color + "; background: " + bg_gradient + ";'>"
+        "<div style='display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.8rem;'>"
+        "<span style='font-size: 1.8rem;'>" + icon + "</span>"
+        "<div>"
+        "<div style='font-size: 0.75rem; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: rgba(255,255,255,0.5) !important;'>"
+        "Konteks Naskah (Gemini AI)"
+        "</div>"
+        "<div style='font-size: 1.4rem; font-weight: 800; color: " + color + " !important;'>" + category + "</div>"
+        "</div>"
+        "</div>"
+        "<div style='font-size: 0.95rem; line-height: 1.6; color: rgba(255,255,255,0.85) !important;'>" + explanation + "</div>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+
 # ===========================================================================
 # Render: Sidebar
 # ===========================================================================
@@ -324,14 +369,20 @@ def render_sidebar() -> dict:
             help="Direkomendasikan untuk naskah dengan pencahayaan tidak merata.",
         )
 
+        # Mengambil Gemini API Key secara otomatis dari environment (.env) tanpa menampilkan input box di UI
+        params["api_key"] = os.environ.get("GEMINI_API_KEY", "")
+
         st.markdown("<hr>", unsafe_allow_html=True)
 
-        # Riwayat
         st.markdown("<div class='sidebar-title'>📜 Riwayat Identifikasi</div>", unsafe_allow_html=True)
         records = database.fetch_all_records()
         if records:
             df = pd.DataFrame(records)
             df["confidence_score"] = df["confidence_score"].apply(lambda x: f"{x*100:.1f}%")
+            if "manuscript_context" in df.columns:
+                df["manuscript_context"] = df["manuscript_context"].fillna("")
+            else:
+                df["manuscript_context"] = ""
             df = df.rename(columns={
                 "id"              : "ID",
                 "filename"        : "File",
@@ -340,8 +391,9 @@ def render_sidebar() -> dict:
                 "jawi_chars"      : "Huruf Jawi",
                 "confidence_score": "Kepercayaan",
                 "timestamp"       : "Waktu",
+                "manuscript_context": "Konteks",
             })
-            st.dataframe(df[["ID","File","Jenis Naskah","Kepercayaan","Waktu"]],
+            st.dataframe(df[["ID","File","Jenis Naskah","Konteks","Kepercayaan","Waktu"]],
                          use_container_width=True, hide_index=True)
 
             col_dl, col_clr = st.columns(2)
@@ -423,11 +475,13 @@ def main() -> None:
                     "📜 Identifikasi Naskah", type="primary", use_container_width=True,
                 )
 
-                # Tampilkan hasil tersimpan di session state
                 if "page_result" in st.session_state and not identify_btn:
-                    render_result_banner(st.session_state["page_result"])
-                    render_stats(st.session_state["page_result"])
-                    render_jawi_found(st.session_state["page_result"]["jawi_found"])
+                    res = st.session_state["page_result"]
+                    render_result_banner(res)
+                    render_stats(res)
+                    render_jawi_found(res["jawi_found"])
+                    if "manuscript_context" in res and res["manuscript_context"]:
+                        render_context_card(res["manuscript_context"], res.get("manuscript_explanation", ""))
 
                 if identify_btn:
                     progress_bar = st.progress(0, text="Mempersiapkan analisis…")
@@ -443,17 +497,37 @@ def main() -> None:
                             use_adaptive         = params["use_adaptive"],
                         )
 
-                        progress_bar.progress(90, text="Menghitung hasil…")
+                        progress_bar.progress(80, text="Menghitung hasil…")
+
+                        api_key = params.get("api_key", "")
+                        context_result = None
+                        if api_key:
+                            progress_bar.progress(85, text="Mengidentifikasi konteks naskah dengan Gemini...")
+                            try:
+                                import gemini_service
+                                context_result = gemini_service.identify_context(image, api_key)
+                            except Exception as gemini_err:
+                                st.warning(f"Gagal mengidentifikasi konteks: {gemini_err}")
+
+                        progress_bar.progress(95, text="Menyimpan ke database…")
+
+                        if context_result:
+                            result["manuscript_context"] = context_result.get("kategori", "")
+                            result["manuscript_explanation"] = context_result.get("penjelasan", "")
+                        else:
+                            result["manuscript_context"] = ""
+                            result["manuscript_explanation"] = ""
+
                         st.session_state["page_result"] = result
 
-                        # Simpan ke database
                         database.insert_record(
-                            filename         = uploaded.name,
-                            script_type      = result["script_type"],
-                            total_chars      = result["total_chars"],
-                            jawi_chars       = result["jawi_chars"],
-                            confidence_score = result["confidence"],
-                            timestamp        = datetime.now(),
+                            filename           = uploaded.name,
+                            script_type        = result["script_type"],
+                            total_chars        = result["total_chars"],
+                            jawi_chars         = result["jawi_chars"],
+                            confidence_score   = result["confidence"],
+                            timestamp          = datetime.now(),
+                            manuscript_context = result["manuscript_context"],
                         )
 
                         progress_bar.progress(100, text="Selesai!")
@@ -462,6 +536,8 @@ def main() -> None:
                         render_result_banner(result)
                         render_stats(result)
                         render_jawi_found(result["jawi_found"])
+                        if result["manuscript_context"]:
+                            render_context_card(result["manuscript_context"], result["manuscript_explanation"])
 
                         st.success("✅ Identifikasi selesai! Hasil disimpan ke riwayat.", icon="💾")
 
@@ -493,9 +569,21 @@ def main() -> None:
         if records:
             df = pd.DataFrame(records)
             df["confidence_score"] = df["confidence_score"].apply(lambda x: f"{x*100:.1f}%")
-            df.columns = ["ID", "File", "Jenis Naskah", "Total Huruf",
-                          "Huruf Jawi", "Kepercayaan", "Waktu"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            if "manuscript_context" in df.columns:
+                df["manuscript_context"] = df["manuscript_context"].fillna("")
+            else:
+                df["manuscript_context"] = ""
+            df = df.rename(columns={
+                "id": "ID",
+                "filename": "File",
+                "script_type": "Jenis Naskah",
+                "total_chars": "Total Huruf",
+                "jawi_chars": "Huruf Jawi",
+                "confidence_score": "Kepercayaan",
+                "timestamp": "Waktu",
+                "manuscript_context": "Konteks"
+            })
+            st.dataframe(df[["ID", "File", "Jenis Naskah", "Konteks", "Total Huruf", "Huruf Jawi", "Kepercayaan", "Waktu"]], use_container_width=True, hide_index=True)
         else:
             st.info("📭 Belum ada riwayat identifikasi.", icon="ℹ️")
 

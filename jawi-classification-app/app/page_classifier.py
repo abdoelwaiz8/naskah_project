@@ -85,6 +85,7 @@ def _classify_page_segmentation(
     confidence_threshold: float = 0.55,
     max_chars           : int   = 100,
     use_adaptive        : bool  = True,
+    is_arab_asli_verified: bool = False,
 ) -> dict:
     """
     Klasifikasi halaman via segmentasi karakter + voting.
@@ -131,15 +132,20 @@ def _classify_page_segmentation(
             conf   = result["confidence"]
             processed += 1
 
+            is_jawi = _is_jawi_class(cls)
+            if is_jawi and is_arab_asli_verified:
+                is_jawi = False
+                cls = "arab_converted"
+
             char_results.append({
                 "class"     : cls,
                 "confidence": conf,
-                "is_jawi"   : _is_jawi_class(cls),
+                "is_jawi"   : is_jawi,
             })
             classifications[i] = cls
 
             if conf >= confidence_threshold:
-                if _is_jawi_class(cls):
+                if is_jawi:
                     jawi_chars += 1
                     if cls not in jawi_found_map:
                         jawi_found_map[cls] = get_arabic_char(cls)
@@ -197,6 +203,15 @@ def classify_page(
     - Selalu melakukan segmentasi karakter untuk statistik dan anotasi visual.
     - Menggabungkan hasil dari segmentasi dengan model page-level (jika tersedia).
     """
+    # 0. Cek prediksi awal dari model page-level untuk mendeteksi apakah halaman terverifikasi Arab Asli dengan tingkat kepercayaan tinggi.
+    # Ini membantu mengabaikan false positives klasifikasi karakter Jawi akibat tanda harakat/tajwid pada Al-Quran.
+    is_arab_asli_verified = False
+    page_pred = None
+    if page_inference.is_page_model_available():
+        page_pred = page_inference.predict_page(image)
+        if page_pred["script_type"] == "Arab Asli" and page_pred["confidence"] >= 0.85:
+            is_arab_asli_verified = True
+
     # 1. Jalankan segmentasi (selalu) untuk visualisasi dan penjelasan statis
     result = _classify_page_segmentation(
         image,
@@ -205,11 +220,11 @@ def classify_page(
         confidence_threshold = confidence_threshold,
         max_chars            = max_chars,
         use_adaptive         = use_adaptive,
+        is_arab_asli_verified = is_arab_asli_verified,
     )
 
     # 2. Jika model page-level tersedia, gabungkan hasilnya secara Hybrid
-    if page_inference.is_page_model_available():
-        page_pred = page_inference.predict_page(image)
+    if page_pred is not None:
         page_type = page_pred["script_type"]
         page_conf = page_pred["confidence"]
         

@@ -55,7 +55,8 @@ def initialize_db() -> None:
         total_chars      INTEGER  NOT NULL DEFAULT 0,
         jawi_chars       INTEGER  NOT NULL DEFAULT 0,
         confidence_score REAL     NOT NULL DEFAULT 0.0,
-        timestamp        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        timestamp        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        manuscript_context TEXT    NOT NULL DEFAULT ''
     );
     """
     with _get_connection() as conn:
@@ -76,7 +77,7 @@ def _migrate_db() -> None:
            - Buat tabel baru dengan schema v2
            - Salin data lama ke tabel baru (predicted_class → script_type)
            - Drop tabel lama
-        3. Jika hanya kolom baru yang kurang, gunakan ALTER TABLE ADD COLUMN.
+         3. Jika hanya kolom baru yang kurang, gunakan ALTER TABLE ADD COLUMN.
     """
     with _get_connection() as conn:
         cursor = conn.execute("PRAGMA table_info(classification_history)")
@@ -97,12 +98,13 @@ def _migrate_db() -> None:
                     total_chars      INTEGER  NOT NULL DEFAULT 0,
                     jawi_chars       INTEGER  NOT NULL DEFAULT 0,
                     confidence_score REAL     NOT NULL DEFAULT 0.0,
-                    timestamp        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    timestamp        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    manuscript_context TEXT   NOT NULL DEFAULT ''
                 );
 
                 INSERT INTO classification_history
                     (id, filename, script_type, total_chars, jawi_chars,
-                     confidence_score, timestamp)
+                     confidence_score, timestamp, manuscript_context)
                 SELECT
                     id,
                     filename,
@@ -110,7 +112,8 @@ def _migrate_db() -> None:
                     0,
                     0,
                     COALESCE(confidence_score, 0.0),
-                    timestamp
+                    timestamp,
+                    ''
                 FROM classification_history_old;
 
                 DROP TABLE classification_history_old;
@@ -119,66 +122,51 @@ def _migrate_db() -> None:
             """)
 
         else:
-            # ── Tambah kolom yang belum ada (schema v2 parsial) ───────────
             for sql in [
                 "ALTER TABLE classification_history ADD COLUMN script_type TEXT DEFAULT ''",
                 "ALTER TABLE classification_history ADD COLUMN total_chars INTEGER DEFAULT 0",
                 "ALTER TABLE classification_history ADD COLUMN jawi_chars  INTEGER DEFAULT 0",
+                "ALTER TABLE classification_history ADD COLUMN manuscript_context TEXT DEFAULT ''",
             ]:
                 try:
                     conn.execute(sql)
                 except Exception:
-                    pass  # Kolom sudah ada
+                    pass
             conn.commit()
 
 
-# ---------------------------------------------------------------------------
-# CRUD
-# ---------------------------------------------------------------------------
-
 def insert_record(
-    filename        : str,
-    script_type     : str,
-    total_chars     : int,
-    jawi_chars      : int,
+    filename: str,
+    script_type: str,
+    total_chars: int,
+    jawi_chars: int,
     confidence_score: float,
-    timestamp       : datetime | None = None,
+    timestamp: datetime | None = None,
+    manuscript_context: str = "",
 ) -> int:
-    """
-    Menyimpan satu record hasil klasifikasi halaman ke database.
-
-    Returns:
-        ID baris yang baru dimasukkan.
-    """
     if timestamp is None:
         timestamp = datetime.now()
 
-    sql = """
-    INSERT INTO classification_history
-        (filename, script_type, total_chars, jawi_chars, confidence_score, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """
+    sql = (
+        "INSERT INTO classification_history "
+        "(filename, script_type, total_chars, jawi_chars, confidence_score, timestamp, manuscript_context) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
     with _get_connection() as conn:
         cursor = conn.execute(
             sql,
-            (filename, script_type, total_chars, jawi_chars, confidence_score, timestamp),
+            (filename, script_type, total_chars, jawi_chars, confidence_score, timestamp, manuscript_context),
         )
         conn.commit()
         return cursor.lastrowid
 
 
 def fetch_all_records() -> list[dict]:
-    """
-    Mengambil semua record dari tabel, diurutkan dari yang terbaru.
-
-    Returns:
-        List of dict, masing-masing merepresentasikan satu baris.
-    """
-    sql = """
-    SELECT id, filename, script_type, total_chars, jawi_chars, confidence_score, timestamp
-    FROM classification_history
-    ORDER BY timestamp DESC
-    """
+    sql = (
+        "SELECT id, filename, script_type, total_chars, jawi_chars, confidence_score, timestamp, manuscript_context "
+        "FROM classification_history "
+        "ORDER BY timestamp DESC"
+    )
     with _get_connection() as conn:
         rows = conn.execute(sql).fetchall()
         return [dict(row) for row in rows]
