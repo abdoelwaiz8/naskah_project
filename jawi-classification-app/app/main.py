@@ -2,195 +2,472 @@
 main.py
 -------
 Aplikasi Streamlit untuk identifikasi jenis naskah (Arab Jawi / Arab Asli)
-dari gambar halaman naskah penuh menggunakan model ResNet34 PyTorch.
+menggunakan backend FastAPI (PyTorch ResNet34 & Gemini) dengan tampilan minimalis profesional.
 """
 
 from __future__ import annotations
-import sys, os
-from pathlib import Path
-sys.path.insert(0, os.path.dirname(__file__))
-
-env_path = Path(__file__).resolve().parent.parent / ".env"
-if env_path.exists():
-    with open(env_path, "r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped:
-                if stripped[0] != "#":
-                    parts = stripped.split("=", 1)
-                    if len(parts) == 2:
-                        os.environ[parts[0].strip()] = parts[1].strip()
-
-import streamlit as st
+import sys
+import os
+import io
+import base64
+import requests
 import pandas as pd
 from PIL import Image
 from datetime import datetime
+import streamlit as st
 
-import database
-import inference
-import page_classifier as pc
-from utils import load_image_from_upload, format_confidence, get_arabic_char
+# URL Backend FastAPI
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
 # ===========================================================================
 # Konfigurasi halaman
 # ===========================================================================
 st.set_page_config(
     page_title="Identifikasi Naskah Jawi",
-    page_icon="📜",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ===========================================================================
-# CSS
+# CSS (Minimalis Profesional - Abu-abu & Putih)
 # ===========================================================================
 def inject_css() -> None:
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Noto+Naskh+Arabic:wght@400;600;700&display=swap');
 
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    :root {
+        --bg-primary: #ffffff;
+        --bg-secondary: #f9fafb;
+        --border-color: #e5e7eb;
+        --text-primary: #111827;
+        --text-secondary: #4b5563;
+        --text-muted: #9ca3af;
+        --accent-color: #000000;
+        --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
 
+    /* Global Overrides */
     .stApp {
-        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-        min-height: 100vh;
+        background-color: var(--bg-primary);
+        color: var(--text-primary);
+        font-family: var(--font-sans);
     }
+    
+    /* Enforce light background and modern styling on sidebar */
     [data-testid="stSidebar"] {
-        background: rgba(255,255,255,0.04);
-        backdrop-filter: blur(20px);
-        border-right: 1px solid rgba(255,255,255,0.08);
+        background-color: var(--bg-secondary) !important;
+        border-right: 1px solid var(--border-color) !important;
     }
 
-    /* Hero */
-    .hero-header { text-align:center; padding:2rem 1rem 1rem; }
+    /* Typography & Hierarchy — scoped to markdown/content only, NOT icons */
+    h1, h2, h3, h4, h5, h6 {
+        color: var(--accent-color) !important;
+        font-family: var(--font-sans) !important;
+        font-weight: 700 !important;
+        letter-spacing: -0.025em !important;
+    }
+
+    /* Only apply font to Streamlit's text content containers, not global spans */
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li,
+    [data-testid="stMarkdownContainer"] label {
+        color: var(--text-secondary);
+        font-family: var(--font-sans);
+    }
+
+    /* Sidebar text */
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+        color: var(--text-secondary);
+        font-family: var(--font-sans);
+    }
+
+    /* Slider and toggle labels */
+    [data-testid="stWidgetLabel"] p {
+        color: var(--text-secondary);
+        font-family: var(--font-sans);
+    }
+
+    /* Hero Header */
+    .hero-header { 
+        text-align: left; 
+        padding: 3rem 0 2rem; 
+        border-bottom: 1px solid var(--border-color);
+        margin-bottom: 2.5rem;
+        animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    }
     .hero-title {
-        font-size:2.6rem; font-weight:800;
-        background: linear-gradient(90deg,#a78bfa,#60a5fa,#34d399);
-        -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-        background-clip:text; margin:0; line-height:1.2;
+        font-size: 2.75rem !important; 
+        font-weight: 800 !important;
+        color: var(--accent-color) !important;
+        margin: 0 !important; 
+        letter-spacing: -0.035em !important;
+        line-height: 1.1 !important;
     }
-    .hero-subtitle { font-size:1rem; color:rgba(255,255,255,0.5); margin-top:0.4rem; font-weight:300; }
-    .badge {
-        display:inline-block;
-        background:linear-gradient(135deg,#7c3aed,#3b82f6);
-        color:white; font-size:0.7rem; font-weight:600;
-        letter-spacing:1.5px; padding:0.25rem 0.85rem;
-        border-radius:9999px; margin-bottom:0.8rem; text-transform:uppercase;
+    .hero-subtitle { 
+        font-size: 1.05rem !important; 
+        color: var(--text-secondary) !important; 
+        margin-top: 0.75rem !important; 
+        font-weight: 400 !important; 
+        line-height: 1.6 !important;
+        max-width: 750px;
     }
 
-    /* Glass card */
+    /* Modern Minimal Card */
     .glass-card {
-        background:rgba(255,255,255,0.05);
-        backdrop-filter:blur(16px);
-        border:1px solid rgba(255,255,255,0.10);
-        border-radius:20px; padding:1.6rem; margin-bottom:1rem;
-        transition:border-color 0.3s;
+        background-color: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 12px; 
+        padding: 1.75rem; 
+        margin-bottom: 1.5rem;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
-    .glass-card:hover { border-color:rgba(167,139,250,0.35); }
+    .glass-card:hover { 
+        border-color: var(--accent-color); 
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
+    }
 
-    /* Banner hasil */
+    /* Banner Hasil Klasifikasi (Dark Monochrome) */
     .script-banner {
-        border-radius:20px; padding:2rem 1.5rem;
-        text-align:center; border:2px solid;
-        animation:fadeIn 0.5s ease;
+        border-radius: 12px; 
+        padding: 2.25rem 1.75rem;
+        text-align: center; 
+        border: 1px solid var(--accent-color);
+        background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+        color: #ffffff !important;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+        animation: slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+        margin-bottom: 1.5rem;
     }
     .script-label {
-        font-size:0.75rem; font-weight:600; letter-spacing:2.5px;
-        text-transform:uppercase; opacity:0.7; margin-bottom:0.4rem;
+        font-size: 0.75rem; 
+        font-weight: 600; 
+        letter-spacing: 0.15em;
+        text-transform: uppercase; 
+        color: var(--text-muted) !important; 
+        margin-bottom: 0.5rem;
     }
     .script-type {
-        font-size:2.4rem; font-weight:800; line-height:1.2; margin:0.3rem 0;
+        font-size: 2.25rem; 
+        font-weight: 800; 
+        line-height: 1.2; 
+        margin: 0.5rem 0;
+        color: #ffffff !important;
+        letter-spacing: -0.025em;
     }
     .script-conf {
-        font-size:0.9rem; margin-top:0.5rem; opacity:0.75;
+        font-size: 0.95rem; 
+        color: #e5e7eb !important;
+        line-height: 1.5;
+        margin-top: 0.5rem;
+    }
+    .script-meta {
+        margin-top: 1.25rem;
+        font-size: 0.85rem;
+        color: var(--text-muted) !important;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        padding-top: 0.85rem;
+    }
+    .script-meta strong {
+        color: #ffffff !important;
     }
 
-    /* Stat cards */
-    .stat-row { display:flex; gap:0.8rem; margin:1rem 0; flex-wrap:wrap; }
+    /* Stat Cards Row */
+    .stat-row { 
+        display: flex; 
+        gap: 0.85rem; 
+        margin: 1.5rem 0; 
+        flex-wrap: wrap; 
+    }
     .stat-card {
-        flex:1; min-width:80px;
-        background:rgba(255,255,255,0.06);
-        border:1px solid rgba(255,255,255,0.10);
-        border-radius:14px; padding:0.9rem 1rem; text-align:center;
+        flex: 1; 
+        min-width: 100px;
+        background-color: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 10px; 
+        padding: 1.25rem 1rem; 
+        text-align: center;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.02);
+        transition: all 0.25s ease;
     }
-    .stat-value { font-size:1.6rem; font-weight:700; color:#ffffff; line-height:1; }
-    .stat-label { font-size:0.7rem; color:rgba(255,255,255,0.45); margin-top:0.3rem; text-transform:uppercase; letter-spacing:1px; }
+    .stat-card:hover {
+        border-color: var(--accent-color);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+    }
+    .stat-value { 
+        font-size: 1.75rem; 
+        font-weight: 800; 
+        color: var(--accent-color) !important; 
+        line-height: 1; 
+    }
+    .stat-label { 
+        font-size: 0.65rem; 
+        color: var(--text-secondary) !important; 
+        margin-top: 0.5rem; 
+        text-transform: uppercase; 
+        letter-spacing: 0.05em; 
+        font-weight: 600;
+    }
 
-    /* Jawi char pills */
-    .jawi-pills { display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.6rem; }
-    .jawi-pill {
-        background:rgba(16,185,129,0.15);
-        border:1px solid rgba(16,185,129,0.4);
-        border-radius:999px; padding:0.35rem 0.9rem;
-        font-family:'Noto Naskh Arabic', serif;
-        font-size:1.5rem; color:#10b981; direction:rtl;
+    /* Jawi found container & pills */
+    .jawi-pills { 
+        display: flex; 
+        flex-wrap: wrap; 
+        gap: 0.75rem; 
+        margin-top: 0.75rem; 
+        margin-bottom: 1.5rem;
     }
-    .jawi-pill-label { font-size:0.65rem; color:rgba(255,255,255,0.4); display:block; text-align:center; margin-top:0.1rem; }
+    .jawi-pill-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background-color: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        min-width: 55px;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.02);
+        transition: all 0.2s ease;
+    }
+    .jawi-pill-container:hover {
+        border-color: var(--accent-color);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+    }
+    .jawi-pill {
+        font-family: 'Noto Naskh Arabic', serif;
+        font-size: 1.35rem; 
+        color: var(--accent-color) !important; 
+        font-weight: 700;
+        line-height: 1.2;
+    }
+    .jawi-pill-label { 
+        font-size: 0.65rem; 
+        color: var(--text-secondary) !important; 
+        margin-top: 0.15rem; 
+        text-transform: capitalize;
+    }
 
     /* Legend */
-    .legend { display:flex; gap:1rem; font-size:0.75rem; color:rgba(255,255,255,0.5); margin-top:0.6rem; flex-wrap:wrap; }
-    .legend-dot { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; }
-
-    /* Upload area */
-    [data-testid="stFileUploader"] {
-        background:rgba(255,255,255,0.03) !important;
-        border:2px dashed rgba(167,139,250,0.4) !important;
-        border-radius:16px !important;
+    .legend { 
+        display: flex; 
+        gap: 1.5rem; 
+        font-size: 0.8rem; 
+        color: var(--text-secondary) !important; 
+        margin-top: 0.75rem; 
+        margin-bottom: 1.5rem;
+        flex-wrap: wrap; 
+        padding: 0.85rem 1.25rem;
+        background-color: var(--bg-secondary);
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
     }
-    [data-testid="stFileUploader"]:hover { border-color:rgba(167,139,250,0.8) !important; }
-
-    /* Buttons */
-    .stButton > button {
-        width:100%;
-        background:linear-gradient(135deg,#7c3aed 0%,#3b82f6 100%) !important;
-        color:white !important; border:none !important;
-        border-radius:12px !important; padding:0.75rem 1.5rem !important;
-        font-size:1rem !important; font-weight:600 !important;
-        transition:all 0.25s ease !important;
-        box-shadow:0 4px 20px rgba(124,58,237,0.35) !important;
+    .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
     }
-    .stButton > button:hover {
-        transform:translateY(-2px) !important;
-        box-shadow:0 8px 30px rgba(124,58,237,0.55) !important;
+    .legend-line { 
+        display: inline-block; 
+        width: 20px; 
+        height: 0px; 
+        vertical-align: middle;
     }
 
-    /* Progress */
+    /* Modern Context Card (Gemini AI) */
+    .context-card {
+        background-color: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-left: 4px solid var(--accent-color);
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin-top: 1.5rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.02);
+        animation: fadeIn 0.5s ease-out;
+    }
+    .context-label {
+        font-size: 0.65rem;
+        font-weight: 600;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+        color: var(--text-secondary) !important;
+        margin-bottom: 0.25rem;
+    }
+    .context-category {
+        font-size: 1.3rem;
+        font-weight: 800;
+        color: var(--accent-color) !important;
+        margin-bottom: 0.75rem;
+        letter-spacing: -0.02em;
+    }
+    .context-explanation {
+        font-size: 0.9rem;
+        line-height: 1.6;
+        color: var(--text-secondary) !important;
+    }
+
+    /* Placeholder Card for empty Uploads */
+    .placeholder-card {
+        text-align: center; 
+        padding: 4.5rem 2rem; 
+        border: 2px dashed var(--border-color); 
+        border-radius: 12px;
+        background-color: var(--bg-secondary);
+        transition: all 0.3s ease;
+        margin-bottom: 1.5rem;
+    }
+    .placeholder-card:hover {
+        border-color: var(--accent-color);
+        background-color: #f3f4f6;
+    }
+    .placeholder-text {
+        color: var(--text-secondary) !important;
+        font-size: 0.95rem;
+        margin: 0;
+        font-weight: 500;
+    }
+
+    /* Upload Area Styling — only style the outer container, not internal Streamlit elements */
+    [data-testid="stFileUploader"] > section {
+        background-color: var(--bg-secondary) !important;
+        border: 1.5px dashed var(--border-color) !important;
+        border-radius: 12px !important;
+        transition: border-color 0.25s ease, background-color 0.25s ease !important;
+    }
+    [data-testid="stFileUploader"] > section:hover {
+        border-color: var(--accent-color) !important;
+        background-color: #f3f4f6 !important;
+    }
+
+    /* Buttons styling */
+    .stButton > button, .stDownloadButton > button {
+        width: 100%;
+        background-color: var(--accent-color) !important;
+        color: #ffffff !important; 
+        border: 1px solid var(--accent-color) !important;
+        border-radius: 8px !important;
+        padding: 0.75rem 1.5rem !important;
+        font-size: 0.95rem !important; 
+        font-weight: 600 !important;
+        letter-spacing: 0.025em !important;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        background-color: #1f2937 !important;
+        border-color: #1f2937 !important;
+        color: #ffffff !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05) !important;
+    }
+    .stButton > button:active, .stDownloadButton > button:active {
+        transform: translateY(1px) !important;
+    }
+
+    /* Progress Bar */
     .stProgress > div > div > div {
-        background:linear-gradient(90deg,#7c3aed,#3b82f6) !important;
-        border-radius:9999px !important;
+        background-color: var(--accent-color) !important;
+        border-radius: 4px !important;
+    }
+    .stProgress > div > div {
+        background-color: #f3f4f6 !important;
+        border-radius: 4px !important;
     }
 
-    /* Metrics */
+    /* Metric Card Styling */
     [data-testid="stMetric"] {
-        background:rgba(255,255,255,0.06) !important;
-        border-radius:14px !important; padding:1rem !important;
-        border:1px solid rgba(255,255,255,0.08) !important;
+        background-color: var(--bg-primary) !important;
+        border-radius: 10px !important; 
+        padding: 1.25rem !important;
+        border: 1px solid var(--border-color) !important;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02) !important;
+        transition: all 0.25s ease !important;
     }
-    [data-testid="stMetricLabel"] { color:rgba(255,255,255,0.55) !important; }
-    [data-testid="stMetricValue"] { color:#ffffff !important; font-weight:700 !important; }
+    [data-testid="stMetric"]:hover {
+        border-color: var(--accent-color) !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.04) !important;
+    }
+    [data-testid="stMetricLabel"] p { 
+        color: var(--text-secondary) !important; 
+        font-weight: 600 !important;
+        font-size: 0.75rem !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+    }
+    [data-testid="stMetricValue"] div { 
+        color: var(--accent-color) !important; 
+        font-weight: 800 !important; 
+        font-size: 1.6rem !important;
+        letter-spacing: -0.03em !important;
+    }
 
-    h1,h2,h3,h4,h5,h6,p,label,span { color:rgba(255,255,255,0.90) !important; }
-    hr  { border-color:rgba(255,255,255,0.1) !important; }
-    .stAlert { border-radius:12px !important; }
+    /* Alerts */
+    .stAlert { 
+        border-radius: 10px !important; 
+        border: 1px solid var(--border-color) !important; 
+        background-color: var(--bg-secondary) !important;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.02) !important;
+    }
+    .stAlert [data-testid="stNotificationContent"] {
+        color: var(--text-primary) !important;
+    }
 
+    /* Sidebar Title & Elements */
     .sidebar-title {
-        font-size:0.72rem; font-weight:600; text-transform:uppercase;
-        letter-spacing:1.5px; color:rgba(255,255,255,0.4) !important; margin-bottom:0.5rem;
+        font-size: 0.75rem; 
+        font-weight: 700; 
+        text-transform: uppercase;
+        letter-spacing: 0.1em; 
+        color: var(--text-primary) !important; 
+        margin-bottom: 0.8rem;
+        margin-top: 1.2rem;
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 0.4rem;
     }
 
+    /* Dataframe Overrides */
+    [data-testid="stDataFrame"] {
+        border: 1px solid var(--border-color) !important;
+        border-radius: 8px !important;
+        overflow: hidden !important;
+    }
+
+    /* Global divider override */
+    hr {
+        margin: 2rem 0 !important;
+        border: 0 !important;
+        border-top: 1px solid var(--border-color) !important;
+    }
+
+    /* Keyframes Animations */
     @keyframes fadeIn {
-        from { opacity:0; transform:translateY(10px); }
-        to   { opacity:1; transform:translateY(0); }
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes slideUp {
+        from { opacity: 0; transform: translateY(16px); }
+        to   { opacity: 1; transform: translateY(0); }
     }
     </style>
     """, unsafe_allow_html=True)
 
 
 # ===========================================================================
-# Inisialisasi DB (cached)
+# Cek Ketersediaan Model dari Backend
 # ===========================================================================
-def init_database() -> None:
-    database.initialize_db()
+def check_model_availability() -> bool:
+    try:
+        response = requests.get(f"{BACKEND_URL}/model-status", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("character_model_available", False)
+    except Exception:
+        pass
+    return False
 
 
 # ===========================================================================
@@ -199,11 +476,9 @@ def init_database() -> None:
 def render_hero() -> None:
     st.markdown("""
     <div class="hero-header">
-        <div class="badge">📜 Computer Vision · Identifikasi Naskah</div>
         <h1 class="hero-title">Identifikasi Naskah Arab</h1>
         <p class="hero-subtitle">
-            Unggah gambar halaman naskah — sistem akan menentukan apakah<br>
-            naskah tersebut <strong>Arab Jawi</strong> atau <strong>Arab Asli</strong>
+            Unggah halaman naskah kuno untuk mengidentifikasi apakah ditulis dalam tulisan Arab Jawi atau Arab Asli.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -217,28 +492,19 @@ def render_result_banner(result: dict) -> None:
     conf  = result["confidence"]
 
     if stype == "Arab Jawi":
-        color  = "#10b981"
-        emoji  = "🟢"
-        desc   = "Naskah ini menggunakan tulisan Arab Jawi"
+        desc = "Naskah ini diidentifikasi menggunakan tulisan Arab Jawi"
     elif stype == "Arab Asli":
-        color  = "#3b82f6"
-        emoji  = "🔵"
-        desc   = "Naskah ini menggunakan tulisan Arab Asli"
+        desc = "Naskah ini diidentifikasi menggunakan tulisan Arab Asli"
     else:
-        color  = "#f59e0b"
-        emoji  = "⚠️"
-        desc   = "Karakter tidak dapat terdeteksi pada gambar ini"
+        desc = "Karakter tidak dapat terdeteksi pada gambar ini"
 
     st.markdown(f"""
-    <div class="script-banner glass-card"
-         style="border-color:{color}; background:linear-gradient(135deg,{color}18,{color}08);">
-        <div class="script-label">Hasil Identifikasi Naskah</div>
-        <div style="font-size:2.5rem; margin:0.3rem 0;">{emoji}</div>
-        <div class="script-type" style="color:{color};">{stype}</div>
+    <div class="script-banner">
+        <div class="script-label">Hasil Klasifikasi Naskah</div>
+        <div class="script-type">{stype}</div>
         <div class="script-conf">{desc}</div>
-        <div style="margin-top:0.8rem; font-size:0.85rem; color:rgba(255,255,255,0.6);">
-            Tingkat Kepercayaan: <strong style="color:{color};">
-            {format_confidence(conf)}</strong>
+        <div class="script-meta">
+            Tingkat Kepercayaan: <strong>{conf*100:.1f}%</strong>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -251,25 +517,24 @@ def render_stats(result: dict) -> None:
     total     = result["total_chars"]
     jawi_c    = result["jawi_chars"]
     arab_c    = result["arab_chars"]
-    processed = result["processed_chars"]
     jawi_pct  = f"{result['jawi_ratio']*100:.1f}%"
 
     st.markdown(f"""
     <div class="stat-row">
         <div class="stat-card">
             <div class="stat-value">{total}</div>
-            <div class="stat-label">Total Karakter Terdeteksi</div>
+            <div class="stat-label">Total Karakter</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color:#10b981;">{jawi_c}</div>
-            <div class="stat-label">Huruf Jawi Ditemukan</div>
+            <div class="stat-value">{jawi_c}</div>
+            <div class="stat-label">Huruf Jawi</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color:#60a5fa;">{arab_c}</div>
-            <div class="stat-label">Huruf Arab Standar</div>
+            <div class="stat-value">{arab_c}</div>
+            <div class="stat-label">Huruf Arab</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color:#a78bfa;">{jawi_pct}</div>
+            <div class="stat-value">{jawi_pct}</div>
             <div class="stat-label">Rasio Jawi</div>
         </div>
     </div>
@@ -283,13 +548,13 @@ def render_jawi_found(jawi_found: list[dict]) -> None:
     if not jawi_found:
         return
 
-    st.markdown("**✨ Huruf Jawi-Spesifik yang Ditemukan:**")
+    st.markdown("**Huruf Jawi Spesifik yang Ditemukan:**")
     pills_html = '<div class="jawi-pills">'
     for item in jawi_found:
         char = item["char"] or item["class"]
         cls  = item["class"]
         pills_html += f"""
-        <div style="text-align:center;">
+        <div class="jawi-pill-container">
             <span class="jawi-pill">{char}</span>
             <span class="jawi-pill-label">{cls}</span>
         </div>"""
@@ -297,119 +562,101 @@ def render_jawi_found(jawi_found: list[dict]) -> None:
     st.markdown(pills_html, unsafe_allow_html=True)
 
 
+# ===========================================================================
+# Render: Informasi Konteks (Gemini AI)
+# ===========================================================================
 def render_context_card(category: str, explanation: str) -> None:
     if not category:
         return
-    if category == "Agama":
-        color = "#10b981"
-        bg_gradient = "linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(4, 120, 87, 0.05) 100%)"
-        icon = "🕌"
-    elif category == "Hikayat":
-        color = "#f59e0b"
-        bg_gradient = "linear-gradient(135deg, rgba(245, 158, 11, 0.15) 0%, rgba(180, 83, 9, 0.05) 100%)"
-        icon = "📜"
-    else:
-        color = "#3b82f6"
-        bg_gradient = "linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(29, 78, 216, 0.05) 100%)"
-        icon = "🧠"
-
-    st.markdown(
-        "<div class='glass-card' style='border-left: 5px solid " + color + "; background: " + bg_gradient + ";'>"
-        "<div style='display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.8rem;'>"
-        "<span style='font-size: 1.8rem;'>" + icon + "</span>"
-        "<div>"
-        "<div style='font-size: 0.75rem; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: rgba(255,255,255,0.5) !important;'>"
-        "Konteks Naskah (Gemini AI)"
-        "</div>"
-        "<div style='font-size: 1.4rem; font-weight: 800; color: " + color + " !important;'>" + category + "</div>"
-        "</div>"
-        "</div>"
-        "<div style='font-size: 0.95rem; line-height: 1.6; color: rgba(255,255,255,0.85) !important;'>" + explanation + "</div>"
-        "</div>",
-        unsafe_allow_html=True
-    )
+    
+    st.markdown(f"""
+    <div class="context-card">
+        <div class="context-label">Konteks Naskah (Gemini AI)</div>
+        <div class="context-category">{category}</div>
+        <div class="context-explanation">{explanation}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ===========================================================================
 # Render: Sidebar
 # ===========================================================================
 def render_sidebar() -> dict:
-    """Render sidebar dan kembalikan dict parameter segmentasi."""
     params: dict = {}
     with st.sidebar:
-        # Status model
-        st.markdown("<div class='sidebar-title'>⚙️ Status Model</div>", unsafe_allow_html=True)
-        if inference.is_model_available():
-            st.success("✅ Model tersedia", icon="🟢")
+        st.markdown("<div class='sidebar-title'>Status Model</div>", unsafe_allow_html=True)
+        if check_model_availability():
+            st.success("Model Tersedia (API Backend)")
         else:
-            st.warning("⚠️ Model belum ditemukan.\nLetakkan `resnet34_jawi.pth` di folder `/model/`.", icon="🟡")
+            st.warning("Model Belum Tersedia di Backend")
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
-        # Parameter segmentasi
-        st.markdown("<div class='sidebar-title'>🔧 Parameter Segmentasi</div>", unsafe_allow_html=True)
+        st.markdown("<div class='sidebar-title'>Parameter Analisis</div>", unsafe_allow_html=True)
         params["min_area"] = st.slider(
-            "Ukuran Minimum Karakter (piksel²)",
+            "Ukuran Karakter Minimum (px²)",
             min_value=50, max_value=1000, value=300, step=50,
-            help="Kontur lebih kecil dari nilai ini diabaikan (filter noise).",
         )
         params["confidence_threshold"] = st.slider(
-            "Ambang Kepercayaan",
+            "Ambang Kepercayaan Klasifikasi",
             min_value=0.30, max_value=0.90, value=0.55, step=0.05,
-            help="Prediksi di bawah ambang ini tidak dihitung dalam voting.",
         )
         params["max_chars"] = st.slider(
-            "Maks Karakter Diproses",
+            "Batas Karakter Maksimum",
             min_value=20, max_value=200, value=100, step=10,
-            help="Batasi jumlah karakter agar proses lebih cepat.",
         )
         params["use_adaptive"] = st.toggle(
             "Adaptive Thresholding",
             value=True,
-            help="Direkomendasikan untuk naskah dengan pencahayaan tidak merata.",
         )
 
-        # Mengambil Gemini API Key secara otomatis dari environment (.env) tanpa menampilkan input box di UI
         params["api_key"] = os.environ.get("GEMINI_API_KEY", "")
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
-        st.markdown("<div class='sidebar-title'>📜 Riwayat Identifikasi</div>", unsafe_allow_html=True)
-        records = database.fetch_all_records()
+        st.markdown("<div class='sidebar-title'>Riwayat Analisis</div>", unsafe_allow_html=True)
+        try:
+            response = requests.get(f"{BACKEND_URL}/history", timeout=5)
+            records = response.json() if response.status_code == 200 else []
+        except Exception:
+            records = []
+
         if records:
             df = pd.DataFrame(records)
             df["confidence_score"] = df["confidence_score"].apply(lambda x: f"{x*100:.1f}%")
-            if "manuscript_context" in df.columns:
-                df["manuscript_context"] = df["manuscript_context"].fillna("")
-            else:
-                df["manuscript_context"] = ""
+            df["manuscript_context"] = df["manuscript_context"].fillna("")
             df = df.rename(columns={
                 "id"              : "ID",
                 "filename"        : "File",
                 "script_type"     : "Jenis Naskah",
-                "total_chars"     : "Total Huruf",
-                "jawi_chars"      : "Huruf Jawi",
                 "confidence_score": "Kepercayaan",
                 "timestamp"       : "Waktu",
                 "manuscript_context": "Konteks",
             })
-            st.dataframe(df[["ID","File","Jenis Naskah","Konteks","Kepercayaan","Waktu"]],
+            
+            # Format waktu
+            df["Waktu"] = pd.to_datetime(df["Waktu"]).dt.strftime('%H:%M:%S %d/%m/%y')
+            
+            st.dataframe(df[["File","Jenis Naskah","Kepercayaan"]],
                          use_container_width=True, hide_index=True)
 
             col_dl, col_clr = st.columns(2)
             with col_dl:
                 csv = df.to_csv(index=False).encode("utf-8")
-                st.download_button("⬇️ Export CSV", data=csv,
+                st.download_button("Ekspor CSV", data=csv,
                                    file_name="riwayat_naskah.csv",
                                    mime="text/csv", use_container_width=True)
             with col_clr:
-                if st.button("🗑️ Hapus Semua", use_container_width=True):
-                    database.clear_all_records()
-                    st.rerun()
+                if st.button("Hapus Semua", use_container_width=True):
+                    try:
+                        requests.delete(f"{BACKEND_URL}/history")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Gagal menghapus: {err}")
         else:
             st.markdown(
-                "<p style='color:rgba(255,255,255,0.35);font-size:0.85rem;'>"
-                "Belum ada riwayat identifikasi.</p>",
+                "<p style='color:#000000;font-size:0.85rem;'>"
+                "Belum ada riwayat analisis.</p>",
                 unsafe_allow_html=True,
             )
 
@@ -417,11 +664,10 @@ def render_sidebar() -> dict:
 
 
 # ===========================================================================
-# Halaman utama
+# Halaman Utama
 # ===========================================================================
 def main() -> None:
     inject_css()
-    init_database()
     render_hero()
     params = render_sidebar()
 
@@ -429,150 +675,157 @@ def main() -> None:
 
     # ── Kolom kiri: upload ────────────────────────────────────────────────
     with col_left:
-        st.markdown("### 📤 Unggah Gambar Naskah")
+        st.markdown("### Unggah Gambar Naskah")
         uploaded = st.file_uploader(
-            label="Seret & lepas gambar naskah, atau klik untuk memilih",
+            label="Unggah berkas naskah",
             type=["jpg", "jpeg", "png", "webp", "tif", "tiff"],
-            help="Format: JPG, PNG, WebP, TIFF",
             label_visibility="collapsed",
         )
 
         if uploaded:
-            image = load_image_from_upload(uploaded)
+            image = Image.open(uploaded).convert("RGB")
             st.image(image,
-                     caption=f"📁 {uploaded.name}  ·  {image.size[0]}×{image.size[1]} px",
+                     caption=f"Berkas: {uploaded.name}  ·  {image.size[0]}×{image.size[1]} px",
                      use_container_width=True)
 
             st.markdown("---")
             m1, m2, m3 = st.columns(3)
             m1.metric("Nama File", uploaded.name[:18] + ("…" if len(uploaded.name) > 18 else ""))
-            m2.metric("Ukuran",    f"{uploaded.size / 1024:.1f} KB")
-            m3.metric("Resolusi",  f"{image.size[0]}×{image.size[1]}")
+            m2.metric("Ukuran Berkas", f"{uploaded.size / 1024:.1f} KB")
+            m3.metric("Resolusi", f"{image.size[0]}×{image.size[1]}")
 
     # ── Kolom kanan: hasil ────────────────────────────────────────────────
     with col_right:
-        st.markdown("### 🔍 Hasil Identifikasi")
+        st.markdown("### Hasil Identifikasi")
 
         if not uploaded:
             st.markdown("""
-            <div class="glass-card" style="text-align:center;padding:3rem 1.5rem;">
-                <div style="font-size:3.5rem;">📜</div>
-                <p style="color:rgba(255,255,255,0.4);margin-top:0.8rem;">
-                    Unggah gambar halaman naskah terlebih dahulu<br>
-                    untuk memulai identifikasi.
-                </p>
+            <div class="placeholder-card">
+                <p class="placeholder-text">Unggah naskah kuno untuk memulai analisis klasifikasi.</p>
             </div>
             """, unsafe_allow_html=True)
         else:
-            if not inference.is_model_available():
-                st.error(
-                    "❌ **File model tidak ditemukan!**\n\n"
-                    "Letakkan `resnet34_jawi.pth` di dalam folder `/model/`.",
-                    icon="🚫",
-                )
-            else:
-                identify_btn = st.button(
-                    "📜 Identifikasi Naskah", type="primary", use_container_width=True,
-                )
+            identify_btn = st.button(
+                "ANALISIS NASKAH", type="primary", use_container_width=True,
+            )
 
-                if "page_result" in st.session_state and not identify_btn:
-                    res = st.session_state["page_result"]
-                    render_result_banner(res)
-                    render_stats(res)
-                    render_jawi_found(res["jawi_found"])
-                    if "manuscript_context" in res and res["manuscript_context"]:
-                        render_context_card(res["manuscript_context"], res.get("manuscript_explanation", ""))
+            # Menampilkan hasil yang disimpan di session state (jika ada)
+            if "page_result" in st.session_state and not identify_btn:
+                res = st.session_state["page_result"]
+                render_result_banner(res)
+                render_stats(res)
+                render_jawi_found(res["jawi_found"])
+                if "manuscript_context" in res and res["manuscript_context"]:
+                    render_context_card(res["manuscript_context"], res.get("manuscript_explanation", ""))
 
-                if identify_btn:
-                    progress_bar = st.progress(0, text="Mempersiapkan analisis…")
+            if identify_btn:
+                progress_bar = st.progress(0, text="Menghubungi API backend...")
 
+                try:
+                    # Persiapkan request file & parameter
+                    buffered_img = io.BytesIO()
+                    image.save(buffered_img, format="JPEG")
+                    img_bytes = buffered_img.getvalue()
+
+                    files = {"file": (uploaded.name, img_bytes, "image/jpeg")}
+                    data = {
+                        "min_area": str(params["min_area"]),
+                        "confidence_threshold": str(params["confidence_threshold"]),
+                        "max_chars": str(params["max_chars"]),
+                        "use_adaptive": "true" if params["use_adaptive"] else "false",
+                        "api_key": params["api_key"],
+                    }
+
+                    progress_bar.progress(30, text="Segmentasi & Klasifikasi karakter...")
+                    
+                    response = requests.post(f"{BACKEND_URL}/classify", files=files, data=data, timeout=120)
+                    
+                    if response.status_code != 200:
+                        raise Exception(f"Backend API error: {response.text}")
+                    
+                    result = response.json()
+                    
+                    progress_bar.progress(85, text="Menyimpan hasil analisis...")
+
+                    # Simpan ke DB riwayat lewat API
+                    db_record = {
+                        "filename": uploaded.name,
+                        "script_type": result["script_type"],
+                        "total_chars": result["total_chars"],
+                        "jawi_chars": result["jawi_chars"],
+                        "confidence_score": result["confidence"],
+                        "timestamp": datetime.now().isoformat(),
+                        "manuscript_context": result["manuscript_context"]
+                    }
                     try:
-                        progress_bar.progress(10, text="Melakukan segmentasi karakter…")
+                        requests.post(f"{BACKEND_URL}/history", json=db_record, timeout=5)
+                    except Exception as db_err:
+                        st.warning(f"Gagal mencatat riwayat: {db_err}")
 
-                        result = pc.classify_page(
-                            image,
-                            min_area             = params["min_area"],
-                            confidence_threshold = params["confidence_threshold"],
-                            max_chars            = params["max_chars"],
-                            use_adaptive         = params["use_adaptive"],
-                        )
+                    # Simpan ke session state
+                    st.session_state["page_result"] = result
+                    
+                    progress_bar.progress(100, text="Selesai!")
+                    progress_bar.empty()
 
-                        progress_bar.progress(80, text="Menghitung hasil…")
+                    # Render hasil
+                    render_result_banner(result)
+                    render_stats(result)
+                    render_jawi_found(result["jawi_found"])
+                    if result.get("manuscript_context"):
+                        render_context_card(result["manuscript_context"], result["manuscript_explanation"])
 
-                        api_key = params.get("api_key", "")
-                        context_result = None
-                        if api_key:
-                            progress_bar.progress(85, text="Mengidentifikasi konteks naskah dengan Gemini...")
-                            try:
-                                import gemini_service
-                                context_result = gemini_service.identify_context(image, api_key)
-                            except Exception as gemini_err:
-                                st.warning(f"Gagal mengidentifikasi konteks: {gemini_err}")
+                    st.success("Analisis selesai! Hasil disimpan ke riwayat.")
+                    st.rerun()
 
-                        progress_bar.progress(95, text="Menyimpan ke database…")
-
-                        if context_result:
-                            result["manuscript_context"] = context_result.get("kategori", "")
-                            result["manuscript_explanation"] = context_result.get("penjelasan", "")
-                        else:
-                            result["manuscript_context"] = ""
-                            result["manuscript_explanation"] = ""
-
-                        st.session_state["page_result"] = result
-
-                        database.insert_record(
-                            filename           = uploaded.name,
-                            script_type        = result["script_type"],
-                            total_chars        = result["total_chars"],
-                            jawi_chars         = result["jawi_chars"],
-                            confidence_score   = result["confidence"],
-                            timestamp          = datetime.now(),
-                            manuscript_context = result["manuscript_context"],
-                        )
-
-                        progress_bar.progress(100, text="Selesai!")
-                        progress_bar.empty()
-
-                        render_result_banner(result)
-                        render_stats(result)
-                        render_jawi_found(result["jawi_found"])
-                        if result["manuscript_context"]:
-                            render_context_card(result["manuscript_context"], result["manuscript_explanation"])
-
-                        st.success("✅ Identifikasi selesai! Hasil disimpan ke riwayat.", icon="💾")
-
-                    except Exception as e:
-                        progress_bar.empty()
-                        st.error(f"❌ Terjadi kesalahan: {e}")
+                except Exception as e:
+                    progress_bar.empty()
+                    st.error(f"Terjadi kesalahan saat memproses: {e}")
 
     # ── Gambar anotasi (lebar penuh) ──────────────────────────────────────
     if "page_result" in st.session_state and uploaded:
         result = st.session_state["page_result"]
-        if result["total_chars"] > 0:
+        if result.get("total_chars", 0) > 0 and "annotated_image_base64" in result:
             st.markdown("---")
-            st.markdown("### 🖼️ Visualisasi Deteksi Karakter")
+            st.markdown("### Deteksi Karakter")
             st.markdown("""
             <div class="legend">
-                <span><span class="legend-dot" style="background:#10b981;"></span>Huruf Jawi-spesifik</span>
-                <span><span class="legend-dot" style="background:#60a5fa;"></span>Huruf Arab standar</span>
-                <span><span class="legend-dot" style="background:#6b7280;"></span>Confidence rendah</span>
+                <div class="legend-item">
+                    <span class="legend-line" style="border-bottom: 3px solid #1a202c;"></span>
+                    <span>Huruf Jawi-Spesifik (Tebal Solid)</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-line" style="border-bottom: 1px solid #718096;"></span>
+                    <span>Huruf Arab Standar (Tipis Solid)</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-line" style="border-bottom: 1px dashed #a0aec0;"></span>
+                    <span>Confidence Rendah (Putus-Putus)</span>
+                </div>
             </div>
             """, unsafe_allow_html=True)
-            st.image(result["annotated_image"],
-                     caption="Bounding box: hijau = Jawi, biru = Arab standar",
+            
+            # Decode gambar base64
+            img_bytes = base64.b64decode(result["annotated_image_base64"])
+            annotated_img = Image.open(io.BytesIO(img_bytes))
+            
+            st.image(annotated_img,
+                     caption="Deteksi bounding box karakter monokrom",
                      use_container_width=True)
 
-    # ── Tabel riwayat (expandable) ────────────────────────────────────────
+    # ── Tabel riwayat lengkap (expandable) ──────────────────────────────────
     st.markdown("---")
-    with st.expander("📊 Tabel Riwayat Identifikasi Lengkap", expanded=False):
-        records = database.fetch_all_records()
+    with st.expander("Tabel Riwayat Analisis Lengkap", expanded=False):
+        try:
+            response = requests.get(f"{BACKEND_URL}/history", timeout=5)
+            records = response.json() if response.status_code == 200 else []
+        except Exception:
+            records = []
+
         if records:
             df = pd.DataFrame(records)
             df["confidence_score"] = df["confidence_score"].apply(lambda x: f"{x*100:.1f}%")
-            if "manuscript_context" in df.columns:
-                df["manuscript_context"] = df["manuscript_context"].fillna("")
-            else:
-                df["manuscript_context"] = ""
+            df["manuscript_context"] = df["manuscript_context"].fillna("")
             df = df.rename(columns={
                 "id": "ID",
                 "filename": "File",
@@ -583,9 +836,14 @@ def main() -> None:
                 "timestamp": "Waktu",
                 "manuscript_context": "Konteks"
             })
-            st.dataframe(df[["ID", "File", "Jenis Naskah", "Konteks", "Total Huruf", "Huruf Jawi", "Kepercayaan", "Waktu"]], use_container_width=True, hide_index=True)
+            
+            # Format waktu
+            df["Waktu"] = pd.to_datetime(df["Waktu"]).dt.strftime('%H:%M:%S %d/%m/%Y')
+            
+            st.dataframe(df[["ID", "File", "Jenis Naskah", "Konteks", "Total Huruf", "Huruf Jawi", "Kepercayaan", "Waktu"]], 
+                         use_container_width=True, hide_index=True)
         else:
-            st.info("📭 Belum ada riwayat identifikasi.", icon="ℹ️")
+            st.info("Belum ada riwayat analisis.")
 
 
 if __name__ == "__main__":

@@ -152,12 +152,12 @@ def draw_annotated(
     confidence_threshold: float = 0.6,
 ) -> Image.Image:
     """
-    Buat salinan gambar dengan bounding box berwarna berdasarkan hasil klasifikasi.
+    Buat salinan gambar dengan bounding box monokrom berdasarkan hasil klasifikasi.
 
-    Warna:
-        - Hijau (#10b981) : Karakter Jawi-spesifik
-        - Biru (#60a5fa)  : Karakter Arab standar
-        - Abu  (#6b7280)  : Confidence rendah / tidak diproses
+    Gaya Kotak:
+        - Jawi-spesifik    : Garis hitam tebal solid (3px)
+        - Arab standar     : Garis hitam tipis solid (1px)
+        - Tidak dikenal/abu: Garis abu-abu putus-putus (1px)
 
     Args:
         image                : PIL Image asli.
@@ -166,24 +166,44 @@ def draw_annotated(
         confidence_threshold : Ambang confidence (tidak digunakan di sini, hanya untuk referensi).
 
     Returns:
-        PIL Image dengan bounding box.
+        PIL Image dengan bounding box monokrom.
     """
     annotated = image.copy().convert("RGB")
     draw      = ImageDraw.Draw(annotated)
 
     JAWI_PREFIXES = {"jawi_ca", "jawi_ga", "jawi_nga", "jawi_nya", "jawi_pa", "jawi_va"}
 
-    for (x, y, bw, bh), cls in zip(bboxes, classifications):
-        if cls and any(cls.startswith(p) for p in JAWI_PREFIXES):
-            color = "#10b981"   # hijau – Jawi
-            width = 3
-        elif cls and cls.startswith("arab_"):
-            color = "#60a5fa"   # biru  – Arab
-            width = 2
-        else:
-            color = "#6b7280"   # abu   – tidak dikenal
-            width = 1
+    def draw_dashed_line(x1, y1, x2, y2, color, width=1, dash_len=4):
+        length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        if length == 0:
+            return
+        dx = (x2 - x1) / length
+        dy = (y2 - y1) / length
+        curr = 0.0
+        while curr < length:
+            end = min(curr + dash_len, length)
+            draw.line([x1 + dx * curr, y1 + dy * curr, x1 + dx * end, y1 + dy * end], fill=color, width=width)
+            curr += dash_len * 2
 
-        draw.rectangle([x, y, x + bw, y + bh], outline=color, width=width)
+    def draw_dashed_rectangle(x1, y1, x2, y2, color, width=1, dash_len=4):
+        draw_dashed_line(x1, y1, x2, y1, color, width, dash_len)
+        draw_dashed_line(x2, y1, x2, y2, color, width, dash_len)
+        draw_dashed_line(x2, y2, x1, y2, color, width, dash_len)
+        draw_dashed_line(x1, y2, x1, y1, color, width, dash_len)
+
+    for (x, y, bw, bh), cls in zip(bboxes, classifications):
+        x1, y1 = x, y
+        x2, y2 = x + bw, y + bh
+
+        if cls and any(cls.startswith(p) for p in JAWI_PREFIXES):
+            # Jawi - Hitam tebal solid
+            draw.rectangle([x1, y1, x2, y2], outline="#000000", width=3)
+        elif cls and cls.startswith("arab_"):
+            # Arab standar - Hitam tipis solid
+            draw.rectangle([x1, y1, x2, y2], outline="#111111", width=1)
+        else:
+            # Tidak dikenal / rendah - Abu putus-putus
+            draw_dashed_rectangle(x1, y1, x2, y2, color="#888888", width=1, dash_len=4)
 
     return annotated
+
